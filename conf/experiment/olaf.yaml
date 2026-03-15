@@ -1,0 +1,12 @@
+# @package _global_
+defaults:
+  - /scene: snowman
+  - /solver: medium
+  - /physics: default
+  - /kernel: torch
+  - /run: default
+
+run:
+  steps: 1000
+  save_every: 10
+  log_every: 100

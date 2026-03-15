@@ -1,0 +1,10 @@
+name: snowball
+description: "Snowball thrown into a wall"
+
+particles:
+  - type: sphere
+    center: [0.5, 0.3, 0.5]
+    radius: 0.1
+    n_particles: 15000
+    velocity: [0.0, 25.0, 0.0]
+    seed: 42

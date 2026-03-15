@@ -1,0 +1,5 @@
+defaults:
+  - material: snow
+
+gravity: [0.0, 0.0, -9.81]
+colliders: []

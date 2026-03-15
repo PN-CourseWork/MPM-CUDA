@@ -1,0 +1,3 @@
+grid_res: 32
+dt: 1e-4
+bound: 3

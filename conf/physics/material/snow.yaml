@@ -1,0 +1,6 @@
+E: 1.4e5
+nu: 0.2
+theta_c: 2.5e-2
+theta_s: 7.5e-3
+hardening: 10.0
+p_rho: 400.0

@@ -1,0 +1,3 @@
+steps: 3000
+save_every: 10
+log_every: 500

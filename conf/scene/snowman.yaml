@@ -1,0 +1,20 @@
+name: snowman
+description: "Snowball smashes into a snowman figure"
+
+particles:
+  # Snowman figure (from mesh, stationary)
+  - type: mesh
+    stl_path: "3dModels/olaf_simple.stl"
+    center: [0.6, 0.5, 0.1]
+    height: 0.45
+    n_particles: 35000
+    velocity: [0.0, 0.0, 0.0]
+    seed: 1
+
+  # Snowball projectile
+  - type: sphere
+    center: [0.2, 0.5, 0.30]
+    radius: 0.06
+    n_particles: 8000
+    velocity: [12.0, 0.0, 1.0]
+    seed: 10

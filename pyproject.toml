@@ -1,0 +1,33 @@
+[project]
+name = "mpm-cuda"
+version = "0.1.0"
+description = "Material Point Method snow simulation with PyTorch + custom CUDA kernels"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "torch>=2.10.0",
+    "h5py>=3.10",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+    "pyvista>=0.47.1",
+    "imageio>=2.37.3",
+    "imageio-ffmpeg>=0.6.0",
+    "pysplashsurf>=0.14.0.0",
+    "meshio>=5.3.5",
+    "trimesh>=4.11.3",
+    "rtree>=1.4.1",
+    "fast-simplification>=0.1.13",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "jax>=0.6.2",
+]
