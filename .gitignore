@@ -17,4 +17,5 @@ CLAUDE.md
 *.log
 .DS_Store
 3dModels/
-CLAUDE.md 
+uv.lock
+CLAUDE.md
