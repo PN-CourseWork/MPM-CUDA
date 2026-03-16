@@ -18,6 +18,7 @@ dependencies = [
     "trimesh>=4.11.3",
     "rtree>=1.4.1",
     "fast-simplification>=0.1.13",
+    "setuptools>=68",
 ]
 
 [build-system]
