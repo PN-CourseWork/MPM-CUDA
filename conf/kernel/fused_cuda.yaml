@@ -1,0 +1,3 @@
+backend: fused_cuda
+device: cuda
+block_size: 256

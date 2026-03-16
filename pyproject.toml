@@ -19,6 +19,7 @@ dependencies = [
     "rtree>=1.4.1",
     "fast-simplification>=0.1.13",
     "setuptools>=68",
+    "cuda-python",
 ]
 
 [build-system]

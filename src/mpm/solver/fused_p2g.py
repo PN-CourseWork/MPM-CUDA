@@ -1,43 +1,115 @@
-"""P2G scatter via custom CUDA kernel."""
+"""P2G scatter and fused stress+P2G via custom CUDA kernels.
+
+Compiled at runtime using cuda.core (NVRTC). No C++ wrapper needed.
+"""
 
 from __future__ import annotations
 
 import os
 
-from torch.utils.cpp_extension import load
+import numpy as np
+import torch
 
+from cuda.core.experimental import Device, LaunchConfig, Program, ProgramOptions, launch
 from mpm.params import SimParams
 from mpm.state import GridState
 
-_module = None
+# Compiled kernel cache
+_kernels: dict[str, object] = {}
+_stream = None
 
 
-def _get_module():
-    global _module
-    if _module is None:
-        src_dir = os.path.join(os.path.dirname(__file__), "kernels")
-        _module = load(
-            name="p2g_cuda",
-            sources=[
-                os.path.join(src_dir, "fused_stress_p2g.cpp"),
-                os.path.join(src_dir, "fused_stress_p2g.cu"),
-            ],
-            extra_cuda_cflags=[
-                "-arch=sm_90", "-O3", "--use_fast_math",
-                "-lineinfo", "-Xptxas=-v",
-            ],
-        )
-    return _module
+def _get_stream():
+    """Get a cuda.core Stream for kernel launches."""
+    global _stream
+    if _stream is None:
+        dev = Device(torch.cuda.current_device())
+        dev.set_current()
+        _stream = dev.create_stream()
+    return _stream
+
+
+def _compile_kernels():
+    """Compile the .cu file via NVRTC and extract both kernels."""
+    if _kernels:
+        return
+
+    src_path = os.path.join(os.path.dirname(__file__), "kernels", "fused_stress_p2g.cu")
+    with open(src_path) as f:
+        source = f.read()
+
+    dev = Device(torch.cuda.current_device())
+    dev.set_current()
+    arch = f"sm_{dev.compute_capability[0]}{dev.compute_capability[1]}"
+
+    prog = Program(source, code_type="c++",
+                   options=ProgramOptions(std="c++17", arch=arch,
+                                          fmad=True, use_fast_math=True))
+    mod = prog.compile("cubin")
+
+    _kernels["p2g"] = mod.get_kernel("p2g_kernel")
+    _kernels["fused"] = mod.get_kernel("fused_stress_p2g_kernel")
 
 
 def p2g_scatter_cuda(x, v, C, stress, params: SimParams, block_size: int = 256):
     """P2G scatter via custom CUDA kernel. Returns GridState."""
-    mod = _get_module()
-    grid_v, grid_m = mod.p2g(
-        x.contiguous(), v.contiguous(), C.contiguous(),
-        stress.contiguous(),
-        params.grid_res, params.dt, params.inv_dx, params.dx,
-        params.p_vol, params.p_mass,
-        block_size,
+    _compile_kernels()
+
+    N = x.shape[0]
+    GR = params.grid_res
+    GR3 = GR ** 3
+
+    grid_v = torch.zeros(GR3, 3, dtype=torch.float32, device=x.device)
+    grid_m = torch.zeros(GR3, dtype=torch.float32, device=x.device)
+
+    grid_dim = (N + block_size - 1) // block_size
+    config = LaunchConfig(grid=grid_dim, block=block_size)
+
+    launch(_get_stream(), config, _kernels["p2g"],
+           x.data_ptr(), v.data_ptr(), C.data_ptr(),
+           stress.data_ptr(),
+           grid_v.data_ptr(), grid_m.data_ptr(),
+           np.int32(N), np.int32(GR),
+           np.float32(params.dt), np.float32(params.inv_dx),
+           np.float32(params.dx), np.float32(params.p_vol),
+           np.float32(params.p_mass))
+
+    return GridState(
+        velocity=grid_v.reshape(GR, GR, GR, 3),
+        mass=grid_m.reshape(GR, GR, GR),
     )
-    return GridState(velocity=grid_v, mass=grid_m)
+
+
+def fused_stress_p2g_cuda(x, v, C, Fe, Jp, params: SimParams, block_size: int = 256):
+    """Fused stress + P2G via custom CUDA kernel. Returns (Fe_new, Jp_new, GridState)."""
+    _compile_kernels()
+
+    N = x.shape[0]
+    GR = params.grid_res
+    GR3 = GR ** 3
+
+    Fe_new = torch.empty(N, 3, 3, dtype=torch.float32, device=x.device)
+    Jp_new = torch.empty(N, dtype=torch.float32, device=x.device)
+    grid_v = torch.zeros(GR3, 3, dtype=torch.float32, device=x.device)
+    grid_m = torch.zeros(GR3, dtype=torch.float32, device=x.device)
+
+    grid_dim = (N + block_size - 1) // block_size
+    config = LaunchConfig(grid=grid_dim, block=block_size)
+
+    launch(_get_stream(), config, _kernels["fused"],
+           x.data_ptr(), v.data_ptr(), C.data_ptr(),
+           Fe.data_ptr(), Jp.data_ptr(),
+           Fe_new.data_ptr(), Jp_new.data_ptr(),
+           grid_v.data_ptr(), grid_m.data_ptr(),
+           np.int32(N), np.int32(GR),
+           np.float32(params.dt), np.float32(params.inv_dx),
+           np.float32(params.dx), np.float32(params.p_vol),
+           np.float32(params.p_mass),
+           np.float32(params.theta_c), np.float32(params.theta_s),
+           np.float32(params.hardening),
+           np.float32(params.mu_0), np.float32(params.lambda_0))
+
+    return Fe_new, Jp_new, GridState(
+        velocity=grid_v.reshape(GR, GR, GR, 3),
+        mass=grid_m.reshape(GR, GR, GR),
+    )

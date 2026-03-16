@@ -14,20 +14,22 @@ from mpm.solver.grid_ops import update_grid
 from mpm.solver.g2p import gather, compute_stencil
 
 
-PHASES = ["stress", "p2g", "grid_ops", "g2p"]
+TORCH_PHASES = ["stress", "p2g", "grid_ops", "g2p"]
+FUSED_PHASES = ["stress_p2g", "grid_ops", "g2p"]
 
 
 class StepTimings:
-    def __init__(self):
-        self.totals = {p: 0.0 for p in PHASES}
+    def __init__(self, phases):
+        self.PHASES = phases
+        self.totals = {p: 0.0 for p in phases}
         self.count = 0
 
     def reset(self):
-        self.totals = {p: 0.0 for p in PHASES}
+        self.totals = {p: 0.0 for p in self.PHASES}
         self.count = 0
 
     def record(self, t: dict[str, float]):
-        for p in PHASES:
+        for p in self.PHASES:
             self.totals[p] += t.get(p, 0.0)
         self.count += 1
 
@@ -66,48 +68,54 @@ class Stepper:
         self.params = params
         self.kernel_backend = kernel_backend
         self.block_size = block_size
-        self.timings = StepTimings()
         self._cuda_events = None
-        self._p2g_fn = None
+        self._cached_fn = None
+
+        phases = FUSED_PHASES if kernel_backend == "fused_cuda" else TORCH_PHASES
+        self.timings = StepTimings(phases)
 
     def _ensure_cuda_events(self):
         if self._cuda_events is None:
             self._cuda_events = {
                 p: (torch.cuda.Event(enable_timing=True),
                     torch.cuda.Event(enable_timing=True))
-                for p in PHASES
+                for p in self.timings.PHASES
             }
         return self._cuda_events
 
-    def _get_p2g_fn(self):
-        """Return the P2G function for the selected backend."""
-        if self._p2g_fn is None:
+    def _get_cuda_fn(self):
+        """Lazy-load the appropriate CUDA function."""
+        if self._cached_fn is None:
             if self.kernel_backend == "cuda":
                 from mpm.solver.fused_p2g import p2g_scatter_cuda
-                self._p2g_fn = p2g_scatter_cuda
-            # torch backend uses compute_p2g_data + scatter (inline below)
-        return self._p2g_fn
+                self._cached_fn = p2g_scatter_cuda
+            elif self.kernel_backend == "fused_cuda":
+                from mpm.solver.fused_p2g import fused_stress_p2g_cuda
+                self._cached_fn = fused_stress_p2g_cuda
+        return self._cached_fn
 
     def __call__(self, state: ParticleState) -> ParticleState:
         x, v, C, F, Jp = state
         p = self.params
 
-        if x.is_cuda:
+        if self.kernel_backend == "fused_cuda":
+            return self._step_fused_cuda(x, v, C, F, Jp, p)
+        elif x.is_cuda:
             return self._step_cuda(x, v, C, F, Jp, p)
         else:
             return self._step_cpu(x, v, C, F, Jp, p)
 
+    # --- torch (separate phases) ---
+
     def _do_p2g_torch(self, x, v, C, stress, p):
-        """P2G via PyTorch ops (compute_p2g_data + scatter)."""
         p2g_data = compute_p2g_data(x, v, C, stress, p)
         grid = scatter(p2g_data, p.grid_res)
-        return grid, p2g_data  # p2g_data reused by G2P
+        return grid, p2g_data
 
     def _do_p2g_cuda(self, x, v, C, stress, p):
-        """P2G via custom CUDA kernel."""
-        p2g_fn = self._get_p2g_fn()
+        p2g_fn = self._get_cuda_fn()
         grid = p2g_fn(x, v, C, stress, p, self.block_size)
-        stencil = compute_stencil(x, p)  # recompute for G2P
+        stencil = compute_stencil(x, p)
         return grid, stencil
 
     def _step_cpu(self, x, v, C, F, Jp, p):
@@ -142,10 +150,39 @@ class Stepper:
 
         torch.cuda.synchronize()
         t = {}
-        for phase in PHASES:
+        for phase in self.timings.PHASES:
             t[phase] = ev[phase][0].elapsed_time(ev[phase][1]) / 1000.0
         self.timings.record(t)
         return ParticleState(new_x, new_v, new_C, new_Fe, stress_result.Jp_new)
+
+    # --- fused_cuda (stress + P2G in one kernel) ---
+
+    def _do_fused(self, x, v, C, F, Jp, p):
+        fused_fn = self._get_cuda_fn()
+        Fe_new, Jp_new, grid = fused_fn(x, v, C, F, Jp, p, self.block_size)
+        return Fe_new, Jp_new, grid
+
+    def _step_fused_cuda(self, x, v, C, F, Jp, p):
+        ev = self._ensure_cuda_events()
+
+        Fe_new, Jp_new, grid = _timed_cuda(
+            self._do_fused, ev["stress_p2g"][0], ev["stress_p2g"][1],
+            x, v, C, F, Jp, p)
+
+        grid = _timed_cuda(
+            update_grid, ev["grid_ops"][0], ev["grid_ops"][1], grid, p)
+
+        stencil = compute_stencil(x, p)
+        (new_x, new_v, new_C, new_Fe) = _timed_cuda(
+            gather, ev["g2p"][0], ev["g2p"][1],
+            grid.velocity, stencil, x, Fe_new, p)
+
+        torch.cuda.synchronize()
+        t = {}
+        for phase in self.timings.PHASES:
+            t[phase] = ev[phase][0].elapsed_time(ev[phase][1]) / 1000.0
+        self.timings.record(t)
+        return ParticleState(new_x, new_v, new_C, new_Fe, Jp_new)
 
 
 def build_step(params: SimParams, kernel_cfg=None) -> Stepper:
