@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     scene_name, params, state = build_scene(cfg)
-    step = build_step(params)
+    step = build_step(params, kernel_cfg=cfg.kernel)
 
     total_steps = cfg.run.steps
     save_every = cfg.run.get("save_every", 1)

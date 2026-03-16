@@ -30,7 +30,7 @@ def _eye3(dev: torch.device) -> torch.Tensor:
 # Polar decomposition via Newton-Schulz iterations (batched matmuls only)
 # ---------------------------------------------------------------------------
 
-def _polar_newton_schulz(F: torch.Tensor, n_iter: int = 5) -> torch.Tensor:
+def _polar_newton_schulz(F: torch.Tensor, n_iter: int = 3) -> torch.Tensor:
     I = torch.eye(3, device=F.device, dtype=F.dtype)
     norms = torch.sqrt((F * F).sum((-2, -1), keepdim=True).clamp(min=1e-12))
     Y = F * (1.7320508 / norms)  # sqrt(3) / ||F||
