@@ -1,3 +1,0 @@
-backend: torch
-device: cpu
-block_size: 256

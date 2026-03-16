@@ -1,3 +1,0 @@
-backend: torch_compile
-device: cuda
-block_size: 256

@@ -33,7 +33,7 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Scene: {scene_name} — {cfg.scene.description}")
     log.info(f"Particles: {n_particles} | Grid: {params.grid_res}³ | "
              f"Steps: {total_steps} | dt: {params.dt} | "
-             f"Physics time: {sim_time:.4f}s | Device: {state.x.device.type}")
+             f"Physics time: {sim_time:.4f}s | Device: {state.x.devices()}")
 
     log.info("Warmup …")
     state = step(state)

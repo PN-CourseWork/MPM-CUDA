@@ -54,9 +54,9 @@ class FrameWriter:
         self.frame = 0
 
     def append(self, x):
-        """Write one frame of positions (numpy or torch tensor)."""
+        """Write one frame of positions (numpy or JAX array)."""
         self.frame += 1
-        pos = np.asarray(x.detach().cpu() if hasattr(x, 'detach') else x, dtype=np.float32)
+        pos = np.asarray(x, dtype=np.float32)
         _write_vtk(self.output_dir / f"frame_{self.frame:05d}.vtk", pos)
 
     def __enter__(self):

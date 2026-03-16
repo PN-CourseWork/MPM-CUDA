@@ -3,7 +3,7 @@ defaults:
   - /scene: snowman
   - /solver: medium
   - /physics: default
-  - /kernel: torch
+  - /kernel: jax
   - /run: default
 
 run:

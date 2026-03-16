@@ -1,11 +1,11 @@
-"""Particle samplers and initialisation (3D, pure numpy → torch)."""
+"""Particle samplers and initialisation (3D, pure numpy → JAX)."""
 
 from __future__ import annotations
 
 import numpy as np
-import torch
+import jax.numpy as jnp
 
-from mpm.state import ParticleState, resolve_device
+from mpm.state import ParticleState
 
 
 def make_sphere(center, radius, n_particles, velocity=(0.0, 0.0, 0.0), rng=None):
@@ -66,14 +66,16 @@ def make_mesh(stl_path, center, height, n_particles, velocity=(0.0, 0.0, 0.0), r
 
 
 def init_state(positions, velocities, device=None) -> ParticleState:
-    """Create initial simulation state arrays on the given device."""
-    if device is None:
-        device = resolve_device()
+    """Create initial simulation state arrays as JAX arrays.
+
+    The `device` parameter is kept for API compatibility but ignored;
+    JAX handles device placement automatically.
+    """
     n = len(positions)
     return ParticleState(
-        x=torch.tensor(positions, dtype=torch.float32, device=device),
-        v=torch.tensor(velocities, dtype=torch.float32, device=device),
-        C=torch.zeros(n, 3, 3, dtype=torch.float32, device=device),
-        F=torch.eye(3, dtype=torch.float32, device=device).unsqueeze(0).expand(n, -1, -1).clone(),
-        Jp=torch.ones(n, dtype=torch.float32, device=device),
+        x=jnp.array(positions, dtype=jnp.float32),
+        v=jnp.array(velocities, dtype=jnp.float32),
+        C=jnp.zeros((n, 3, 3), dtype=jnp.float32),
+        F=jnp.broadcast_to(jnp.eye(3, dtype=jnp.float32), (n, 3, 3)),
+        Jp=jnp.ones(n, dtype=jnp.float32),
     )

@@ -3,5 +3,5 @@ defaults:
   - /scene: snowball
   - /solver: large
   - /physics: default
-  - /kernel: torch
+  - /kernel: jax
   - /run: default

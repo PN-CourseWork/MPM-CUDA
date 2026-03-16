@@ -11,8 +11,6 @@ import functools
 
 import jax
 import jax.numpy as jnp
-import torch
-
 from mpm.params import SimParams
 from mpm.state import GridState
 
@@ -188,44 +186,19 @@ def _fused_stress_p2g(
 
 
 # ---------------------------------------------------------------------------
-# Public API: torch tensors in/out, JAX inside
+# Public API: JAX arrays in/out
 # ---------------------------------------------------------------------------
-
-def _torch_to_jax(t: torch.Tensor):
-    return jnp.from_dlpack(t.detach().contiguous())
-
-
-def _jax_to_torch(a, device: torch.device):
-    return torch.from_dlpack(a).to(device)
-
 
 def fused_stress_p2g_jax(
     x, v, C, Fe, Jp, params: SimParams, block_size: int = 256,
 ):
     """Fused stress + P2G via JAX. Returns (Fe_new, Jp_new, GridState)."""
-    dev = x.device
-
-    # torch → jax (zero-copy via dlpack)
-    jx = _torch_to_jax(x)
-    jv = _torch_to_jax(v)
-    jC = _torch_to_jax(C)
-    jFe = _torch_to_jax(Fe)
-    jJp = _torch_to_jax(Jp)
-
     Fe_new, Jp_new, grid_v, grid_m = _fused_stress_p2g(
-        jx, jv, jC, jFe, jJp,
+        x, v, C, Fe, Jp,
         params.grid_res,
         params.dt, params.inv_dx, params.dx, params.p_vol, params.p_mass,
         params.theta_c, params.theta_s, params.hardening,
         params.mu_0, params.lambda_0,
     )
 
-    # jax → torch
-    return (
-        _jax_to_torch(Fe_new, dev),
-        _jax_to_torch(Jp_new, dev),
-        GridState(
-            velocity=_jax_to_torch(grid_v, dev),
-            mass=_jax_to_torch(grid_m, dev),
-        ),
-    )
+    return Fe_new, Jp_new, GridState(velocity=grid_v, mass=grid_m)
