@@ -1,9 +1,10 @@
 """Timestep orchestrator: stress+P2G → grid_ops → G2P.
 
-All backends use fused phases for fair comparison:
-  - torch: PyTorch ops (torch.compile for stress)
-  - jax: JAX jit-compiled
-  - fused_cuda: hand-written CUDA kernel
+Four backends for comparison:
+  - torch:          raw PyTorch eager ops — baseline
+  - torch_compile:  PyTorch + torch.compile — PyTorch's JIT
+  - jax:            JAX + jax.jit — XLA's JIT
+  - fused_cuda:     hand-written CUDA kernel
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import torch
 
 from mpm.params import SimParams
 from mpm.state import ParticleState
-from mpm.solver.stress import compute_stress
+from mpm.solver.stress import compute_stress, compute_stress_compiled
 from mpm.solver.p2g import compute_p2g_data, scatter
 from mpm.solver.grid_ops import update_grid
 from mpm.solver.g2p import gather, compute_stencil
@@ -91,8 +92,16 @@ class Stepper:
     # --- Fused stress+P2G dispatch ---
 
     def _stress_p2g_torch(self, x, v, C, F, Jp, p):
-        """Torch fused stress+P2G: compute stress then scatter."""
+        """Raw PyTorch eager: stress then scatter."""
         stress_result = compute_stress(F, Jp, p)
+        p2g_data = compute_p2g_data(x, v, C, stress_result.stress, p)
+        grid = scatter(p2g_data, p.grid_res)
+        stencil = compute_stencil(x, p)
+        return stress_result.Fe_new, stress_result.Jp_new, grid, stencil
+
+    def _stress_p2g_torch_compile(self, x, v, C, F, Jp, p):
+        """PyTorch + torch.compile: compiled stress then scatter."""
+        stress_result = compute_stress_compiled(F, Jp, p)
         p2g_data = compute_p2g_data(x, v, C, stress_result.stress, p)
         grid = scatter(p2g_data, p.grid_res)
         stencil = compute_stencil(x, p)
@@ -121,6 +130,8 @@ class Stepper:
             return self._stress_p2g_fused_cuda
         elif self.kernel_backend == "jax":
             return self._stress_p2g_jax
+        elif self.kernel_backend == "torch_compile":
+            return self._stress_p2g_torch_compile
         else:
             return self._stress_p2g_torch
 

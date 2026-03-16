@@ -172,25 +172,22 @@ _STRESS_BACKEND = os.environ.get("MPM_STRESS", "auto")
 
 
 def compute_stress(Fe: torch.Tensor, Jp: torch.Tensor, params: SimParams) -> StressResult:
-    backend = _STRESS_BACKEND
-    if backend == "auto":
-        backend = "analytical"
+    """Analytical stress (no JIT compilation)."""
+    stress, Fe_new, Jp_new = _compute_stress_analytical(
+        Fe, Jp, params.theta_c, params.theta_s,
+        params.hardening, params.mu_0, params.lambda_0,
+    )
+    return StressResult(stress, Fe_new, Jp_new)
 
-    if backend == "svd":
-        return _stress_svd(Fe, Jp, params)
-    elif backend == "compile":
-        fn = _get_compiled_stress()
-        stress, Fe_new, Jp_new = fn(
-            Fe, Jp, params.theta_c, params.theta_s,
-            params.hardening, params.mu_0, params.lambda_0,
-        )
-        return StressResult(stress, Fe_new, Jp_new)
-    else:
-        stress, Fe_new, Jp_new = _compute_stress_analytical(
-            Fe, Jp, params.theta_c, params.theta_s,
-            params.hardening, params.mu_0, params.lambda_0,
-        )
-        return StressResult(stress, Fe_new, Jp_new)
+
+def compute_stress_compiled(Fe: torch.Tensor, Jp: torch.Tensor, params: SimParams) -> StressResult:
+    """Analytical stress with torch.compile."""
+    fn = _get_compiled_stress()
+    stress, Fe_new, Jp_new = fn(
+        Fe, Jp, params.theta_c, params.theta_s,
+        params.hardening, params.mu_0, params.lambda_0,
+    )
+    return StressResult(stress, Fe_new, Jp_new)
 
 
 def _stress_svd(Fe: torch.Tensor, Jp: torch.Tensor, params: SimParams) -> StressResult:
