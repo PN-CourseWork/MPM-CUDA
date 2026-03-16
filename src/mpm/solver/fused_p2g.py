@@ -10,7 +10,7 @@ import os
 import numpy as np
 import torch
 
-from cuda.core.experimental import Device, LaunchConfig, Program, ProgramOptions, launch
+from cuda.core.experimental import Device, LaunchConfig, Program, ProgramOptions, Stream, launch
 from mpm.params import SimParams
 from mpm.state import GridState
 
@@ -19,8 +19,8 @@ _kernels: dict[str, object] = {}
 
 
 def _get_stream():
-    """Get PyTorch's current CUDA stream (shares stream to avoid sync issues)."""
-    return torch.cuda.current_stream()
+    """Get PyTorch's current CUDA stream wrapped for cuda.core (avoids cross-stream sync issues)."""
+    return Stream.from_handle(torch.cuda.current_stream().cuda_stream)
 
 
 def _compile_kernels():
