@@ -174,7 +174,7 @@ _STRESS_BACKEND = os.environ.get("MPM_STRESS", "auto")
 def compute_stress(Fe: torch.Tensor, Jp: torch.Tensor, params: SimParams) -> StressResult:
     backend = _STRESS_BACKEND
     if backend == "auto":
-        backend = "compile" if Fe.is_cuda else "analytical"
+        backend = "analytical"
 
     if backend == "svd":
         return _stress_svd(Fe, Jp, params)

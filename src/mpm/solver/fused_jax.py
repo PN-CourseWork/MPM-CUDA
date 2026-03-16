@@ -7,9 +7,6 @@ Letting XLA jit fuse/optimize the computation.
 
 from __future__ import annotations
 
-import functools
-
-import jax
 import jax.numpy as jnp
 import torch
 
@@ -111,7 +108,6 @@ def _sym_eig3x3(S):
 # Fused stress + P2G kernel
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnames=("grid_res",))
 def _fused_stress_p2g(
     x, v, C, Fe, Jp,
     grid_res: int,
