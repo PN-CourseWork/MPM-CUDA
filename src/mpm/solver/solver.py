@@ -1,4 +1,10 @@
-"""Timestep orchestrator: stress -> P2G -> grid_ops -> G2P."""
+"""Timestep orchestrator: stress+P2G → grid_ops → G2P.
+
+All backends use fused phases for fair comparison:
+  - torch: PyTorch ops (torch.compile for stress)
+  - jax: JAX jit-compiled
+  - fused_cuda: hand-written CUDA kernel
+"""
 
 from __future__ import annotations
 
@@ -14,22 +20,20 @@ from mpm.solver.grid_ops import update_grid
 from mpm.solver.g2p import gather, compute_stencil
 
 
-TORCH_PHASES = ["stress", "p2g", "grid_ops", "g2p"]
-FUSED_PHASES = ["stress_p2g", "grid_ops", "g2p"]
+PHASES = ["stress_p2g", "grid_ops", "g2p"]
 
 
 class StepTimings:
-    def __init__(self, phases):
-        self.PHASES = phases
-        self.totals = {p: 0.0 for p in phases}
+    def __init__(self):
+        self.totals = {p: 0.0 for p in PHASES}
         self.count = 0
 
     def reset(self):
-        self.totals = {p: 0.0 for p in self.PHASES}
+        self.totals = {p: 0.0 for p in PHASES}
         self.count = 0
 
     def record(self, t: dict[str, float]):
-        for p in self.PHASES:
+        for p in PHASES:
             self.totals[p] += t.get(p, 0.0)
         self.count += 1
 
@@ -45,12 +49,6 @@ class StepTimings:
         for name, t in entries:
             lines.append(f"  {name:15s}  {t:7.3f}s  ({100*t/total:5.1f}%)")
         return "\n".join(lines)
-
-
-def _timed(fn, *args, **kwargs):
-    t0 = time.perf_counter()
-    result = fn(*args, **kwargs)
-    return result, time.perf_counter() - t0
 
 
 def _timed_cuda(fn, start_event, end_event, *args, **kwargs):
@@ -70,116 +68,101 @@ class Stepper:
         self.block_size = block_size
         self._cuda_events = None
         self._cached_fn = None
-
-        phases = FUSED_PHASES if kernel_backend == "fused_cuda" else TORCH_PHASES
-        self.timings = StepTimings(phases)
+        self.timings = StepTimings()
 
     def _ensure_cuda_events(self):
         if self._cuda_events is None:
             self._cuda_events = {
                 p: (torch.cuda.Event(enable_timing=True),
                     torch.cuda.Event(enable_timing=True))
-                for p in self.timings.PHASES
+                for p in PHASES
             }
         return self._cuda_events
-
-    def _get_cuda_fn(self):
-        """Lazy-load the appropriate CUDA function."""
-        if self._cached_fn is None:
-            if self.kernel_backend == "cuda":
-                from mpm.solver.fused_p2g import p2g_scatter_cuda
-                self._cached_fn = p2g_scatter_cuda
-            elif self.kernel_backend == "fused_cuda":
-                from mpm.solver.fused_p2g import fused_stress_p2g_cuda
-                self._cached_fn = fused_stress_p2g_cuda
-        return self._cached_fn
 
     def __call__(self, state: ParticleState) -> ParticleState:
         x, v, C, F, Jp = state
         p = self.params
 
-        if self.kernel_backend == "fused_cuda":
-            return self._step_fused_cuda(x, v, C, F, Jp, p)
-        elif x.is_cuda:
+        if x.is_cuda:
             return self._step_cuda(x, v, C, F, Jp, p)
         else:
             return self._step_cpu(x, v, C, F, Jp, p)
 
-    # --- torch (separate phases) ---
+    # --- Fused stress+P2G dispatch ---
 
-    def _do_p2g_torch(self, x, v, C, stress, p):
-        p2g_data = compute_p2g_data(x, v, C, stress, p)
+    def _stress_p2g_torch(self, x, v, C, F, Jp, p):
+        """Torch fused stress+P2G: compute stress then scatter."""
+        stress_result = compute_stress(F, Jp, p)
+        p2g_data = compute_p2g_data(x, v, C, stress_result.stress, p)
         grid = scatter(p2g_data, p.grid_res)
-        return grid, p2g_data
-
-    def _do_p2g_cuda(self, x, v, C, stress, p):
-        p2g_fn = self._get_cuda_fn()
-        grid = p2g_fn(x, v, C, stress, p, self.block_size)
         stencil = compute_stencil(x, p)
-        return grid, stencil
+        return stress_result.Fe_new, stress_result.Jp_new, grid, stencil
+
+    def _stress_p2g_fused_cuda(self, x, v, C, F, Jp, p):
+        """Hand-written CUDA kernel: stress+P2G in one launch."""
+        if self._cached_fn is None:
+            from mpm.solver.fused_p2g import fused_stress_p2g_cuda
+            self._cached_fn = fused_stress_p2g_cuda
+        Fe_new, Jp_new, grid = self._cached_fn(x, v, C, F, Jp, p, self.block_size)
+        stencil = compute_stencil(x, p)
+        return Fe_new, Jp_new, grid, stencil
+
+    def _stress_p2g_jax(self, x, v, C, F, Jp, p):
+        """JAX jit-compiled fused stress+P2G."""
+        if self._cached_fn is None:
+            from mpm.solver.fused_jax import fused_stress_p2g_jax
+            self._cached_fn = fused_stress_p2g_jax
+        Fe_new, Jp_new, grid = self._cached_fn(x, v, C, F, Jp, p, self.block_size)
+        stencil = compute_stencil(x, p)
+        return Fe_new, Jp_new, grid, stencil
+
+    def _get_stress_p2g_fn(self):
+        if self.kernel_backend == "fused_cuda":
+            return self._stress_p2g_fused_cuda
+        elif self.kernel_backend == "jax":
+            return self._stress_p2g_jax
+        else:
+            return self._stress_p2g_torch
+
+    # --- Step implementations ---
 
     def _step_cpu(self, x, v, C, F, Jp, p):
         t = {}
-        stress_result, t["stress"] = _timed(compute_stress, F, Jp, p)
-        (grid, stencil), t["p2g"] = _timed(self._do_p2g_torch, x, v, C, stress_result.stress, p)
-        grid, t["grid_ops"] = _timed(update_grid, grid, p)
-        (new_x, new_v, new_C, new_Fe), t["g2p"] = _timed(
-            gather, grid.velocity, stencil, x, stress_result.Fe_new, p
-        )
+        do_sp = self._get_stress_p2g_fn()
+
+        t0 = time.perf_counter()
+        Fe_new, Jp_new, grid, stencil = do_sp(x, v, C, F, Jp, p)
+        t["stress_p2g"] = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        grid = update_grid(grid, p)
+        t["grid_ops"] = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        new_x, new_v, new_C, new_Fe = gather(grid.velocity, stencil, x, Fe_new, p)
+        t["g2p"] = time.perf_counter() - t0
+
         self.timings.record(t)
-        return ParticleState(new_x, new_v, new_C, new_Fe, stress_result.Jp_new)
+        return ParticleState(new_x, new_v, new_C, new_Fe, Jp_new)
 
     def _step_cuda(self, x, v, C, F, Jp, p):
         ev = self._ensure_cuda_events()
-        use_cuda_kernel = self.kernel_backend == "cuda"
+        do_sp = self._get_stress_p2g_fn()
 
-        stress_result = _timed_cuda(
-            compute_stress, ev["stress"][0], ev["stress"][1], F, Jp, p)
-
-        do_p2g = self._do_p2g_cuda if use_cuda_kernel else self._do_p2g_torch
-        grid, stencil = _timed_cuda(
-            do_p2g, ev["p2g"][0], ev["p2g"][1],
-            x, v, C, stress_result.stress, p)
-
-        grid = _timed_cuda(
-            update_grid, ev["grid_ops"][0], ev["grid_ops"][1], grid, p)
-
-        (new_x, new_v, new_C, new_Fe) = _timed_cuda(
-            gather, ev["g2p"][0], ev["g2p"][1],
-            grid.velocity, stencil, x, stress_result.Fe_new, p)
-
-        torch.cuda.synchronize()
-        t = {}
-        for phase in self.timings.PHASES:
-            t[phase] = ev[phase][0].elapsed_time(ev[phase][1]) / 1000.0
-        self.timings.record(t)
-        return ParticleState(new_x, new_v, new_C, new_Fe, stress_result.Jp_new)
-
-    # --- fused_cuda (stress + P2G in one kernel) ---
-
-    def _do_fused(self, x, v, C, F, Jp, p):
-        fused_fn = self._get_cuda_fn()
-        Fe_new, Jp_new, grid = fused_fn(x, v, C, F, Jp, p, self.block_size)
-        return Fe_new, Jp_new, grid
-
-    def _step_fused_cuda(self, x, v, C, F, Jp, p):
-        ev = self._ensure_cuda_events()
-
-        Fe_new, Jp_new, grid = _timed_cuda(
-            self._do_fused, ev["stress_p2g"][0], ev["stress_p2g"][1],
+        Fe_new, Jp_new, grid, stencil = _timed_cuda(
+            do_sp, ev["stress_p2g"][0], ev["stress_p2g"][1],
             x, v, C, F, Jp, p)
 
         grid = _timed_cuda(
             update_grid, ev["grid_ops"][0], ev["grid_ops"][1], grid, p)
 
-        stencil = compute_stencil(x, p)
         (new_x, new_v, new_C, new_Fe) = _timed_cuda(
             gather, ev["g2p"][0], ev["g2p"][1],
             grid.velocity, stencil, x, Fe_new, p)
 
         torch.cuda.synchronize()
         t = {}
-        for phase in self.timings.PHASES:
+        for phase in PHASES:
             t[phase] = ev[phase][0].elapsed_time(ev[phase][1]) / 1000.0
         self.timings.record(t)
         return ParticleState(new_x, new_v, new_C, new_Fe, Jp_new)

@@ -1,3 +1,3 @@
-backend: cuda
+backend: jax
 device: cuda
 block_size: 256
