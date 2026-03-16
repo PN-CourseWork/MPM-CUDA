@@ -24,14 +24,17 @@ _STENCIL = jnp.stack(
 # Polar decomposition via Newton-Schulz
 # ---------------------------------------------------------------------------
 
-def _polar_newton_schulz(F, n_iter=3):
-    """Batched polar decomposition: F = R @ S, returns R."""
+def _polar_newton_schulz(F):
+    """Batched polar decomposition: F = R @ S, returns R.
+
+    Two Newton-Schulz iterations suffice at float32 precision.
+    """
     I = jnp.eye(3)
     norms = jnp.sqrt(jnp.sum(F * F, axis=(-2, -1), keepdims=True).clip(min=1e-12))
     Y = F * (1.7320508 / norms)  # sqrt(3) / ||F||
 
-    for _ in range(n_iter):
-        Y = 0.5 * Y @ (3.0 * I - jnp.swapaxes(Y, -1, -2) @ Y)
+    Y = 0.5 * Y @ (3.0 * I - jnp.swapaxes(Y, -1, -2) @ Y)
+    Y = 0.5 * Y @ (3.0 * I - jnp.swapaxes(Y, -1, -2) @ Y)
 
     return Y
 
@@ -168,7 +171,7 @@ def _step_impl(x, v, C, Fe, Jp, params: SimParams):
 
     flat = nodes[:, :, 0] * GR * GR + nodes[:, :, 1] * GR + nodes[:, :, 2]
 
-    mv = w[:, :, None] * (params.p_mass * v[:, None, :] + jnp.einsum("nij,nkj->nki", affine, dpos))
+    mv = w[:, :, None] * (params.p_mass * v[:, None, :] + dpos @ jnp.swapaxes(affine, -1, -2))
     m = w * params.p_mass
 
     grid_v = jnp.zeros((GR * GR * GR, 3), dtype=jnp.float32)
@@ -181,9 +184,8 @@ def _step_impl(x, v, C, Fe, Jp, params: SimParams):
 
     # ========== GRID OPS ==========
 
-    safe_m = jnp.maximum(grid_m, 1e-30)
-    grid_v = grid_v / safe_m[..., None]
-    grid_v = jnp.where((grid_m > 0)[..., None], grid_v, 0.0)
+    occupied = (grid_m > 0)[..., None]
+    grid_v = jnp.where(occupied, grid_v / jnp.maximum(grid_m, 1e-30)[..., None], 0.0)
 
     gravity = jnp.array(params.gravity, dtype=jnp.float32)
     grid_v = grid_v + DT * gravity
