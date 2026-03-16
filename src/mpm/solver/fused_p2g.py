@@ -44,7 +44,7 @@ def _compile_kernels():
 
     prog = Program(source, code_type="c++",
                    options=ProgramOptions(std="c++17", arch=arch,
-                                          fmad=True, use_fast_math=True))
+                                          use_fast_math=True))
     mod = prog.compile("cubin")
 
     _kernels["p2g"] = mod.get_kernel("p2g_kernel")
