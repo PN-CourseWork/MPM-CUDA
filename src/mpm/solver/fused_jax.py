@@ -17,22 +17,12 @@ from mpm.state import GridState
 
 
 # ---------------------------------------------------------------------------
-# Stencil offsets (materialised once)
-# ---------------------------------------------------------------------------
-_STENCIL = None
-
-
-def _get_stencil():
-    global _STENCIL
-    if _STENCIL is None:
-        ii, jj, kk = jnp.meshgrid(jnp.arange(3), jnp.arange(3), jnp.arange(3), indexing="ij")
-        _STENCIL = jnp.stack([ii.ravel(), jj.ravel(), kk.ravel()], axis=-1)  # (27, 3)
-    return _STENCIL
-
-
-# ---------------------------------------------------------------------------
 # Core fused stress + P2G (pure JAX, jit-safe)
 # ---------------------------------------------------------------------------
+
+# Stencil offsets — computed once outside jit (constant, not traced)
+_STENCIL = jnp.stack(jnp.meshgrid(jnp.arange(3), jnp.arange(3), jnp.arange(3), indexing="ij"), axis=-1).reshape(27, 3)
+
 
 @functools.partial(jax.jit, static_argnames=("grid_res",))
 def _fused_stress_p2g(
@@ -42,7 +32,7 @@ def _fused_stress_p2g(
     theta_c, theta_s, hardening, mu_0, lambda_0,
 ):
     GR = grid_res
-    stencil = _get_stencil()  # (27, 3)
+    stencil = _STENCIL  # (27, 3)
 
     # ---- SVD: Fe = U @ diag(sig) @ Vh ----
     U, sig, Vh = jnp.linalg.svd(Fe)  # (N,3,3), (N,3), (N,3,3)
