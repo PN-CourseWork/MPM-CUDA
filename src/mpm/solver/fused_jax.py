@@ -1,7 +1,8 @@
 """Fused stress + P2G via JAX (jit-compiled).
 
-Same pipeline as the CUDA kernel but expressed in JAX ops,
-letting XLA fuse/optimize the computation.
+Same algorithm as the torch and CUDA backends:
+  Newton-Schulz polar decomposition → Cardano eigendecomposition → stress → P2G scatter.
+Letting XLA jit fuse/optimize the computation.
 """
 
 from __future__ import annotations
@@ -16,13 +17,99 @@ from mpm.params import SimParams
 from mpm.state import GridState
 
 
-# ---------------------------------------------------------------------------
-# Core fused stress + P2G (pure JAX, jit-safe)
-# ---------------------------------------------------------------------------
-
 # Stencil offsets — computed once outside jit (constant, not traced)
-_STENCIL = jnp.stack(jnp.meshgrid(jnp.arange(3), jnp.arange(3), jnp.arange(3), indexing="ij"), axis=-1).reshape(27, 3)
+_STENCIL = jnp.stack(
+    jnp.meshgrid(jnp.arange(3), jnp.arange(3), jnp.arange(3), indexing="ij"),
+    axis=-1,
+).reshape(27, 3)
 
+
+# ---------------------------------------------------------------------------
+# Polar decomposition via Newton-Schulz (matches torch backend)
+# ---------------------------------------------------------------------------
+
+def _polar_newton_schulz(F, n_iter=3):
+    """Batched polar decomposition: F = R @ S, returns R."""
+    I = jnp.eye(3)
+    norms = jnp.sqrt(jnp.sum(F * F, axis=(-2, -1), keepdims=True).clip(min=1e-12))
+    Y = F * (1.7320508 / norms)  # sqrt(3) / ||F||
+
+    for _ in range(n_iter):
+        Y = 0.5 * Y @ (3.0 * I - jnp.swapaxes(Y, -1, -2) @ Y)
+
+    return Y
+
+
+# ---------------------------------------------------------------------------
+# Analytical 3x3 symmetric eigendecomposition (Cardano, matches torch backend)
+# ---------------------------------------------------------------------------
+
+def _cross(a, b):
+    return jnp.stack([
+        a[:, 1] * b[:, 2] - a[:, 2] * b[:, 1],
+        a[:, 2] * b[:, 0] - a[:, 0] * b[:, 2],
+        a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0],
+    ], axis=-1)
+
+
+def _sym_eig3x3(S):
+    """Analytical eigendecomposition of batched 3x3 symmetric matrices."""
+    a11 = S[:, 0, 0]; a22 = S[:, 1, 1]; a33 = S[:, 2, 2]
+    a12 = S[:, 0, 1]; a13 = S[:, 0, 2]; a23 = S[:, 1, 2]
+
+    p = a11 + a22 + a33
+    q = a11*a22 + a11*a33 + a22*a33 - a12*a12 - a13*a13 - a23*a23
+    r = a11*a22*a33 + 2*a12*a13*a23 - a11*a23*a23 - a22*a13*a13 - a33*a12*a12
+
+    p3 = p / 3.0
+    pp = (p * p - 3.0 * q) / 9.0
+    qq = (2.0 * p * p * p - 9.0 * p * q + 27.0 * r) / 54.0
+
+    pp_safe = pp.clip(min=1e-30)
+    sqrt_pp = jnp.sqrt(pp_safe)
+    cos_arg = (qq / (pp_safe * sqrt_pp)).clip(-1.0, 1.0)
+    phi = jnp.arccos(cos_arg) / 3.0
+
+    two_sqrt_pp = 2.0 * sqrt_pp
+    e0 = p3 - two_sqrt_pp * jnp.cos(phi - 2.094395102)
+    e1 = p3 - two_sqrt_pp * jnp.cos(phi + 2.094395102)
+    e2 = p3 - two_sqrt_pp * jnp.cos(phi)
+
+    eigs = jnp.stack([e0, e1, e2], axis=-1)
+
+    I = jnp.eye(3, dtype=S.dtype)
+    vecs_list = []
+
+    for k in range(3):
+        M = S - eigs[:, k:k+1, None] * I[None, :, :]
+        r0 = M[:, 0]; r1 = M[:, 1]; r2 = M[:, 2]
+
+        c01 = _cross(r0, r1)
+        c02 = _cross(r0, r2)
+        c12 = _cross(r1, r2)
+
+        n01 = jnp.sum(c01 * c01, axis=-1)
+        n02 = jnp.sum(c02 * c02, axis=-1)
+        n12 = jnp.sum(c12 * c12, axis=-1)
+
+        best = c12; best_n = n12
+        mask02 = n02 > best_n
+        best = jnp.where(mask02[:, None], c02, best)
+        best_n = jnp.where(mask02, n02, best_n)
+        mask01 = n01 > best_n
+        best = jnp.where(mask01[:, None], c01, best)
+        best_n = jnp.where(mask01, n01, best_n)
+
+        best = best / jnp.sqrt(best_n.clip(min=1e-30))[:, None]
+        vecs_list.append(best)
+
+    vecs = jnp.stack(vecs_list, axis=-1)  # (N, 3, 3)
+    return eigs, vecs
+
+
+# ---------------------------------------------------------------------------
+# Fused stress + P2G kernel
+# ---------------------------------------------------------------------------
 
 @functools.partial(jax.jit, static_argnames=("grid_res",))
 def _fused_stress_p2g(
@@ -33,17 +120,21 @@ def _fused_stress_p2g(
 ):
     GR = grid_res
     stencil = _STENCIL  # (27, 3)
+    I = jnp.eye(3)
 
-    # ---- SVD: Fe = U @ diag(sig) @ Vh ----
-    U, sig, Vh = jnp.linalg.svd(Fe)  # (N,3,3), (N,3), (N,3,3)
-    R = U @ Vh  # rotation
+    # ---- Polar decomposition: Fe = R @ S ----
+    R = _polar_newton_schulz(Fe)
+    S = jnp.swapaxes(R, -1, -2) @ Fe
+
+    # ---- Eigendecomposition of symmetric S ----
+    sig, Q = _sym_eig3x3(S)
 
     # ---- Plasticity: clamp singular values ----
     sig_c = jnp.clip(sig, 1.0 - theta_c, 1.0 + theta_s)
     Jp_new = Jp * jnp.prod(sig, axis=-1) / jnp.prod(sig_c, axis=-1)
 
     # ---- Reconstruct Fe_new ----
-    Fe_new = (U * sig_c[:, None, :]) @ Vh
+    Fe_new = R @ ((Q * sig_c[:, None, :]) @ jnp.swapaxes(Q, -1, -2))
     J = jnp.prod(sig_c, axis=-1)
 
     # ---- Stress: fixed corotated with hardening ----
@@ -51,7 +142,6 @@ def _fused_stress_p2g(
     mu = mu_0 * h
     la = lambda_0 * h
 
-    I = jnp.eye(3)
     stress = (2.0 * mu[:, None, None] * ((Fe_new - R) @ jnp.swapaxes(Fe_new, -1, -2))
               + (la * (J - 1.0) * J)[:, None, None] * I)
 
