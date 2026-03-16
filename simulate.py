@@ -42,16 +42,24 @@ def main(cfg: DictConfig) -> None:
     log.info(f"Simulating {total_steps} steps …")
     step.timings.reset()
     t0 = time.time()
-    with FrameWriter(f"{output_dir}/frames") as writer:
+    if save_every > 0:
+        with FrameWriter(f"{output_dir}/frames") as writer:
+            for i in range(total_steps):
+                state = step(state)
+                if (i + 1) % save_every == 0:
+                    writer.append(state.x)
+                if (i + 1) % log_every == 0 or i == total_steps - 1:
+                    log.info(f"  step {i + 1}/{total_steps} ({time.time() - t0:.1f}s)")
+        n_frames = writer.frame
+    else:
         for i in range(total_steps):
             state = step(state)
-            if (i + 1) % save_every == 0:
-                writer.append(state.x)
             if (i + 1) % log_every == 0 or i == total_steps - 1:
                 log.info(f"  step {i + 1}/{total_steps} ({time.time() - t0:.1f}s)")
+        n_frames = 0
 
     wall_time = time.time() - t0
-    log.info(f"Done → {output_dir}/ ({writer.frame} frames)")
+    log.info(f"Done → {output_dir}/ ({n_frames} frames)")
     log.info(step.timings.report(wall_time))
 
 
