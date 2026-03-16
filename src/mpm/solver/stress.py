@@ -16,7 +16,7 @@ class StressResult(NamedTuple):
     Jp_new: torch.Tensor   # (N,) updated plastic ratio
 
 
-# Cached eye matrix per device
+# Cached eye matrix per device (used outside torch.compile only)
 _eye_cache: dict[torch.device, torch.Tensor] = {}
 
 
@@ -31,7 +31,7 @@ def _eye3(dev: torch.device) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 def _polar_newton_schulz(F: torch.Tensor, n_iter: int = 5) -> torch.Tensor:
-    I = _eye3(F.device)
+    I = torch.eye(3, device=F.device, dtype=F.dtype)
     norms = torch.sqrt((F * F).sum((-2, -1), keepdim=True).clamp(min=1e-12))
     Y = F * (1.7320508 / norms)  # sqrt(3) / ||F||
 
@@ -84,8 +84,8 @@ def _sym_eig3x3(S: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
     eigs = torch.stack([e0, e1, e2], dim=-1)
 
-    I = _eye3(dev)
-    vecs = torch.zeros(N, 3, 3, device=dev)
+    I = torch.eye(3, device=dev, dtype=S.dtype)
+    vecs = torch.zeros(N, 3, 3, device=dev, dtype=S.dtype)
 
     for k in range(3):
         M = S - eigs[:, k:k+1, None] * I.unsqueeze(0)
@@ -114,7 +114,7 @@ def _sym_eig3x3(S: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 # ---------------------------------------------------------------------------
-# Stress computation — core function (compilable)
+# Stress computation — core function (torch.compile-safe: no global caches)
 # ---------------------------------------------------------------------------
 
 def _compute_stress_analytical(
@@ -122,9 +122,8 @@ def _compute_stress_analytical(
     theta_c: float, theta_s: float, hardening: float,
     mu_0: float, lambda_0: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Core stress computation with analytical decomposition. No NamedTuples
-    (incompatible with torch.compile), plain tensors in and out."""
-    I = _eye3(Fe.device)
+    """Core stress computation with analytical decomposition."""
+    I = torch.eye(3, device=Fe.device, dtype=Fe.dtype)
 
     R = _polar_newton_schulz(Fe)
     S = R.mT @ Fe
@@ -148,10 +147,26 @@ def _compute_stress_analytical(
 
 
 # ---------------------------------------------------------------------------
+# torch.compile wrapper (lazy init)
+# ---------------------------------------------------------------------------
+
+_compiled_stress = None
+
+
+def _get_compiled_stress():
+    global _compiled_stress
+    if _compiled_stress is None:
+        _compiled_stress = torch.compile(
+            _compute_stress_analytical, mode="reduce-overhead"
+        )
+    return _compiled_stress
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-# Set MPM_STRESS=svd|analytical|auto (default: auto).
+# Set MPM_STRESS=svd|analytical|compile|auto (default: auto).
 # auto = SVD on CUDA (single fused kernel), analytical on CPU (no LAPACK).
 _STRESS_BACKEND = os.environ.get("MPM_STRESS", "auto")
 
@@ -163,6 +178,13 @@ def compute_stress(Fe: torch.Tensor, Jp: torch.Tensor, params: SimParams) -> Str
 
     if backend == "svd":
         return _stress_svd(Fe, Jp, params)
+    elif backend == "compile":
+        fn = _get_compiled_stress()
+        stress, Fe_new, Jp_new = fn(
+            Fe, Jp, params.theta_c, params.theta_s,
+            params.hardening, params.mu_0, params.lambda_0,
+        )
+        return StressResult(stress, Fe_new, Jp_new)
     else:
         stress, Fe_new, Jp_new = _compute_stress_analytical(
             Fe, Jp, params.theta_c, params.theta_s,
