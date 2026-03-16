@@ -5,8 +5,6 @@ from __future__ import annotations
 import functools
 import time
 
-import torch
-
 from mpm.params import SimParams
 from mpm.state import ParticleState
 from mpm.solver.stress import compute_stress
@@ -57,36 +55,18 @@ class Stepper:
     def __init__(self, params: SimParams):
         self.params = params
         self.timings = StepTimings()
-        self._compiled_p2g_data = None
-        self._compiled_gather = None
-
-    def _get_compiled_p2g_data(self):
-        if self._compiled_p2g_data is None:
-            self._compiled_p2g_data = torch.compile(compute_p2g_data, mode="default")
-        return self._compiled_p2g_data
-
-    def _get_compiled_gather(self):
-        if self._compiled_gather is None:
-            self._compiled_gather = torch.compile(gather, mode="default")
-        return self._compiled_gather
 
     def __call__(self, state: ParticleState) -> ParticleState:
         x, v, C, F, Jp = state
         p = self.params
         t = {}
-        use_compile = x.is_cuda
 
         stress_result, t["stress"] = _timed(compute_stress, F, Jp, p)
-
-        p2g_fn = self._get_compiled_p2g_data() if use_compile else compute_p2g_data
-        p2g_data, t["p2g_data"] = _timed(p2g_fn, x, v, C, stress_result.stress, p)
-
+        p2g_data, t["p2g_data"] = _timed(compute_p2g_data, x, v, C, stress_result.stress, p)
         grid, t["p2g_scatter"] = _timed(scatter, p2g_data, p.grid_res)
         grid, t["grid_ops"] = _timed(update_grid, grid, p)
-
-        gather_fn = self._get_compiled_gather() if use_compile else gather
         (new_x, new_v, new_C, new_Fe), t["g2p"] = _timed(
-            gather_fn, grid.velocity, p2g_data, x, stress_result.Fe_new, p
+            gather, grid.velocity, p2g_data, x, stress_result.Fe_new, p
         )
 
         self.timings.record(t)
