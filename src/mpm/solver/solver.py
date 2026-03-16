@@ -70,7 +70,7 @@ class Stepper:
         self.block_size = block_size
         self.newton_schulz_iters = newton_schulz_iters
 
-        phases = FUSED_PHASES if kernel_backend == "fused_cuda" else TORCH_PHASES
+        phases = FUSED_PHASES if kernel_backend in ("fused_cuda", "fused_torch") else TORCH_PHASES
         self.timings = StepTimings(phases)
         self._cuda_events = None
         self._fused_fn = None
@@ -86,15 +86,19 @@ class Stepper:
 
     def _get_fused_fn(self):
         if self._fused_fn is None:
-            from mpm.solver.fused_p2g import fused_stress_p2g
-            self._fused_fn = fused_stress_p2g
+            if self.kernel_backend == "fused_cuda":
+                from mpm.solver.fused_p2g import fused_stress_p2g
+                self._fused_fn = fused_stress_p2g
+            else:
+                from mpm.solver.fused_p2g_torch import fused_stress_p2g_torch
+                self._fused_fn = fused_stress_p2g_torch
         return self._fused_fn
 
     def __call__(self, state: ParticleState) -> ParticleState:
         x, v, C, F, Jp = state
         p = self.params
 
-        if self.kernel_backend == "fused_cuda":
+        if self.kernel_backend in ("fused_cuda", "fused_torch"):
             return self._step_fused_cuda(x, v, C, F, Jp, p)
         elif x.is_cuda:
             return self._step_cuda(x, v, C, F, Jp, p)
