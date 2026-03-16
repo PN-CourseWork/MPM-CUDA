@@ -32,7 +32,7 @@ where = ["src"]
 
 [dependency-groups]
 dev = [
-    "jax>=0.6.2",
+    "jax[cuda12]>=0.6.2",
 ]
 
 [tool.uv.sources]
