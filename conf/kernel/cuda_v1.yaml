@@ -1,4 +1,4 @@
 backend: fused_cuda
 device: cuda
 block_size: 256
-version: v2_fused  # v1_naive, v2_fused, v3_warp
+version: v1_naive

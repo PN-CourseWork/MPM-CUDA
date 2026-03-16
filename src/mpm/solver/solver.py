@@ -67,4 +67,23 @@ class Stepper:
 
 
 def build_step(params: SimParams, kernel_cfg=None) -> Stepper:
+    """Create a stepper based on kernel config.
+
+    kernel_cfg.backend:
+      "jax"        → JAX XLA solver (default)
+      "fused_cuda" → Hand-written CUDA kernels (requires GPU)
+
+    For CUDA backend, kernel_cfg.version selects the optimization level:
+      "v1_naive"  — 4 kernel launches, global atomicAdd
+      "v2_fused"  — 3 launches, fused stress+P2G
+      "v3_warp"   — 3 launches, warp-per-particle scatter/gather
+    """
+    backend = getattr(kernel_cfg, "backend", "jax") if kernel_cfg else "jax"
+
+    if backend == "fused_cuda":
+        from mpm.solver.cuda_solver import CUDAStepper
+        version = getattr(kernel_cfg, "version", "v2_fused")
+        block_size = getattr(kernel_cfg, "block_size", 256)
+        return CUDAStepper(params, kernel_version=version, block_size=block_size)
+
     return Stepper(params)
