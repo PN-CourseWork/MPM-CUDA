@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import time
 
+import jax
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
@@ -35,32 +36,34 @@ def main(cfg: DictConfig) -> None:
              f"Steps: {total_steps} | dt: {params.dt} | "
              f"Physics time: {sim_time:.4f}s | Device: {state.x.devices()}")
 
-    log.info("Warmup …")
+    log.info("Warmup (JIT compile) …")
     state = step(state)
     log.info("Warmup done.")
 
+    step.reset_timer()
     log.info(f"Simulating {total_steps} steps …")
-    step.timings.reset()
     t0 = time.time()
+
     if save_every > 0:
         with FrameWriter(f"{output_dir}/frames") as writer:
-            for i in range(total_steps):
-                state = step(state)
-                if (i + 1) % save_every == 0:
-                    writer.append(state.x)
-                if (i + 1) % log_every == 0 or i == total_steps - 1:
-                    log.info(f"  step {i + 1}/{total_steps} ({time.time() - t0:.1f}s)")
+            done = 0
+            while done < total_steps:
+                chunk = min(save_every, total_steps - done)
+                state = step.scan(state, chunk)
+                jax.block_until_ready(state)
+                done += chunk
+                writer.append(state.x)
+                if done % log_every < save_every or done == total_steps:
+                    log.info(f"  step {done}/{total_steps} ({time.time() - t0:.1f}s)")
         n_frames = writer.frame
     else:
-        for i in range(total_steps):
-            state = step(state)
-            if (i + 1) % log_every == 0 or i == total_steps - 1:
-                log.info(f"  step {i + 1}/{total_steps} ({time.time() - t0:.1f}s)")
+        state = step.scan(state, total_steps)
+        jax.block_until_ready(state)
         n_frames = 0
 
     wall_time = time.time() - t0
     log.info(f"Done → {output_dir}/ ({n_frames} frames)")
-    log.info(step.timings.report(wall_time))
+    log.info(step.report(wall_time))
 
 
 if __name__ == "__main__":
