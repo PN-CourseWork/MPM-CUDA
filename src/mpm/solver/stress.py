@@ -157,7 +157,7 @@ def _get_compiled_stress():
     global _compiled_stress
     if _compiled_stress is None:
         _compiled_stress = torch.compile(
-            _compute_stress_analytical, mode="reduce-overhead"
+            _compute_stress_analytical, mode="default"
         )
     return _compiled_stress
 
@@ -174,7 +174,7 @@ _STRESS_BACKEND = os.environ.get("MPM_STRESS", "auto")
 def compute_stress(Fe: torch.Tensor, Jp: torch.Tensor, params: SimParams) -> StressResult:
     backend = _STRESS_BACKEND
     if backend == "auto":
-        backend = "analytical"
+        backend = "compile" if Fe.is_cuda else "analytical"
 
     if backend == "svd":
         return _stress_svd(Fe, Jp, params)
