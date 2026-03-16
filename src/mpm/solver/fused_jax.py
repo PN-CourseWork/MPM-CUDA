@@ -252,3 +252,26 @@ def scan_steps(x, v, C, Fe, Jp, params: SimParams, n_steps: int):
         return _step_impl(*carry, params), None
     (x, v, C, Fe, Jp), _ = jax.lax.scan(body, (x, v, C, Fe, Jp), None, length=n_steps)
     return x, v, C, Fe, Jp
+
+
+@functools.partial(jax.jit, static_argnames=("params", "n_saves", "save_every"))
+def scan_trajectory(x, v, C, Fe, Jp, params: SimParams,
+                    n_saves: int, save_every: int):
+    """Run n_saves * save_every steps, returning saved positions.
+
+    Uses nested lax.scan: inner scan runs save_every steps,
+    outer scan collects positions. The entire trajectory is one
+    XLA program with zero Python overhead.
+
+    Returns (final_state_tuple, saved_x) where saved_x is (n_saves, N, 3).
+    """
+    def inner(carry, _):
+        return _step_impl(*carry, params), None
+
+    def outer(carry, _):
+        carry, _ = jax.lax.scan(inner, carry, None, length=save_every)
+        return carry, carry[0]  # save x after each chunk
+
+    (x, v, C, Fe, Jp), saved_x = jax.lax.scan(
+        outer, (x, v, C, Fe, Jp), None, length=n_saves)
+    return x, v, C, Fe, Jp, saved_x

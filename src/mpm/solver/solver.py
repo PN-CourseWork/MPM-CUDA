@@ -13,7 +13,7 @@ import jax
 
 from mpm.params import SimParams
 from mpm.state import ParticleState
-from mpm.solver.fused_jax import full_step, scan_steps
+from mpm.solver.fused_jax import full_step, scan_steps, scan_trajectory
 
 
 class Stepper:
@@ -41,6 +41,19 @@ class Stepper:
         x, v, C, F, Jp = scan_steps(x, v, C, F, Jp, self.params, n_steps)
         self._step_count += n_steps
         return ParticleState(x, v, C, F, Jp)
+
+    def trajectory(self, state: ParticleState, n_saves: int,
+                   save_every: int) -> tuple[ParticleState, "jax.Array"]:
+        """Run n_saves * save_every steps, return (final_state, saved_x).
+
+        The entire trajectory is one XLA program (nested lax.scan).
+        saved_x has shape (n_saves, N, 3).
+        """
+        x, v, C, F, Jp = state
+        x, v, C, F, Jp, saved_x = scan_trajectory(
+            x, v, C, F, Jp, self.params, n_saves, save_every)
+        self._step_count += n_saves * save_every
+        return ParticleState(x, v, C, F, Jp), saved_x
 
     def reset_timer(self):
         self._step_count = 0

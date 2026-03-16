@@ -25,7 +25,6 @@ def main(cfg: DictConfig) -> None:
 
     total_steps = cfg.run.steps
     save_every = cfg.run.get("save_every", 1)
-    log_every = cfg.run.get("log_every", 1)
 
     output_dir = HydraConfig.get().runtime.output_dir
 
@@ -41,22 +40,36 @@ def main(cfg: DictConfig) -> None:
     log.info("Warmup done.")
 
     step.reset_timer()
-    log.info(f"Simulating {total_steps} steps …")
     t0 = time.time()
 
     if save_every > 0:
+        n_saves = total_steps // save_every
+        remainder = total_steps % save_every
+
+        log.info(f"Simulating {n_saves * save_every} steps "
+                 f"({n_saves} saves × {save_every} steps/save) …")
+
+        # Run entire trajectory as one XLA program
+        state, saved_x = step.trajectory(state, n_saves, save_every)
+        jax.block_until_ready(saved_x)
+        compute_time = time.time() - t0
+        log.info(f"Compute done in {compute_time:.1f}s")
+
+        # Handle remainder steps
+        if remainder > 0:
+            state = step.scan(state, remainder)
+            jax.block_until_ready(state)
+
+        # Write all frames to disk
+        log.info(f"Writing {n_saves} frames …")
         with FrameWriter(f"{output_dir}/frames") as writer:
-            done = 0
-            while done < total_steps:
-                chunk = min(save_every, total_steps - done)
-                state = step.scan(state, chunk)
-                jax.block_until_ready(state)
-                done += chunk
+            for i in range(n_saves):
+                writer.append(saved_x[i])
+            if remainder > 0:
                 writer.append(state.x)
-                if done % log_every < save_every or done == total_steps:
-                    log.info(f"  step {done}/{total_steps} ({time.time() - t0:.1f}s)")
-        n_frames = writer.frame
+        n_frames = n_saves + (1 if remainder > 0 else 0)
     else:
+        log.info(f"Simulating {total_steps} steps (no saving) …")
         state = step.scan(state, total_steps)
         jax.block_until_ready(state)
         n_frames = 0
