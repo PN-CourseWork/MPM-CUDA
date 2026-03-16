@@ -16,17 +16,11 @@ from mpm.state import GridState
 
 # Compiled kernel cache
 _kernels: dict[str, object] = {}
-_stream = None
 
 
 def _get_stream():
-    """Get a cuda.core Stream for kernel launches."""
-    global _stream
-    if _stream is None:
-        dev = Device(torch.cuda.current_device())
-        dev.set_current()
-        _stream = dev.create_stream()
-    return _stream
+    """Get PyTorch's current CUDA stream (shares stream to avoid sync issues)."""
+    return torch.cuda.current_stream()
 
 
 def _compile_kernels():
