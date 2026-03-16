@@ -147,42 +147,22 @@ def _compute_stress_analytical(
     return stress, Fe_new, Jp_new
 
 
-# Try to compile for GPU kernel fusion; fall back gracefully
-_compiled_stress = None
-
-
-def _get_compiled_stress():
-    global _compiled_stress
-    if _compiled_stress is None:
-        try:
-            _compiled_stress = torch.compile(
-                _compute_stress_analytical, mode="reduce-overhead"
-            )
-        except Exception:
-            _compiled_stress = _compute_stress_analytical
-    return _compiled_stress
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-# Set MPM_STRESS=svd to use torch.linalg.svd, MPM_STRESS=eigh for eigh,
-# MPM_STRESS=analytical (default) for full analytical, MPM_STRESS=compile
-# for torch.compile'd analytical.
-_STRESS_BACKEND = os.environ.get("MPM_STRESS", "analytical")
+# Set MPM_STRESS=svd|analytical|auto (default: auto).
+# auto = SVD on CUDA (single fused kernel), analytical on CPU (no LAPACK).
+_STRESS_BACKEND = os.environ.get("MPM_STRESS", "auto")
 
 
 def compute_stress(Fe: torch.Tensor, Jp: torch.Tensor, params: SimParams) -> StressResult:
-    if _STRESS_BACKEND == "svd":
+    backend = _STRESS_BACKEND
+    if backend == "auto":
+        backend = "svd" if Fe.is_cuda else "analytical"
+
+    if backend == "svd":
         return _stress_svd(Fe, Jp, params)
-    elif _STRESS_BACKEND == "compile":
-        fn = _get_compiled_stress()
-        stress, Fe_new, Jp_new = fn(
-            Fe, Jp, params.theta_c, params.theta_s,
-            params.hardening, params.mu_0, params.lambda_0,
-        )
-        return StressResult(stress, Fe_new, Jp_new)
     else:
         stress, Fe_new, Jp_new = _compute_stress_analytical(
             Fe, Jp, params.theta_c, params.theta_s,
