@@ -13,12 +13,11 @@ def make_sphere(center, radius, n_particles, velocity=(0.0, 0.0, 0.0), rng=None)
     if rng is None:
         rng = np.random.default_rng(42)
     center = np.asarray(center, dtype=np.float64)
-    pts = []
-    while len(pts) < n_particles:
-        p = rng.uniform(-radius, radius, size=(n_particles * 2, 3))
-        mask = np.linalg.norm(p, axis=1) < radius
-        pts.append(p[mask] + center)
-    pos = np.concatenate(pts)[:n_particles]
+    # Direct sampling: uniform radius via inverse CDF, uniform direction via Gaussian
+    r = radius * rng.random(n_particles) ** (1.0 / 3.0)
+    direction = rng.standard_normal((n_particles, 3))
+    direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+    pos = direction * r[:, np.newaxis] + center
     vel = np.broadcast_to(np.array(velocity), pos.shape).copy()
     return pos, vel
 
