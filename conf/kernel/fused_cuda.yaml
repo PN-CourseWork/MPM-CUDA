@@ -1,4 +1,0 @@
-backend: fused_cuda
-device: cuda
-block_size: 256
-newton_schulz_iters: 3

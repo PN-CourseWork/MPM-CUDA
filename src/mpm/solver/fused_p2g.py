@@ -1,4 +1,4 @@
-"""Fused stress + P2G via custom CUDA kernel."""
+"""P2G scatter via custom CUDA kernel."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ def _get_module():
     if _module is None:
         src_dir = os.path.join(os.path.dirname(__file__), "kernels")
         _module = load(
-            name="fused_stress_p2g",
+            name="p2g_cuda",
             sources=[
                 os.path.join(src_dir, "fused_stress_p2g.cpp"),
                 os.path.join(src_dir, "fused_stress_p2g.cu"),
@@ -30,17 +30,14 @@ def _get_module():
     return _module
 
 
-def fused_stress_p2g(x, v, C, Fe, Jp, params: SimParams,
-                     block_size: int = 256, newton_schulz_iters: int = 3):
-    """Run fused stress + P2G. Returns (Fe_new, Jp_new, GridState)."""
+def p2g_scatter_cuda(x, v, C, stress, params: SimParams, block_size: int = 256):
+    """P2G scatter via custom CUDA kernel. Returns GridState."""
     mod = _get_module()
-    Fe_new, Jp_new, grid_v, grid_m = mod.fused_stress_p2g(
+    grid_v, grid_m = mod.p2g(
         x.contiguous(), v.contiguous(), C.contiguous(),
-        Fe.contiguous(), Jp.contiguous(),
+        stress.contiguous(),
         params.grid_res, params.dt, params.inv_dx, params.dx,
         params.p_vol, params.p_mass,
-        params.theta_c, params.theta_s, params.hardening,
-        params.mu_0, params.lambda_0,
-        block_size, newton_schulz_iters,
+        block_size,
     )
-    return Fe_new, Jp_new, GridState(velocity=grid_v, mass=grid_m)
+    return GridState(velocity=grid_v, mass=grid_m)
